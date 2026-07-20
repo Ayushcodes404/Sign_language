@@ -2,43 +2,69 @@
 speech_utils.py
 
 Captures a short clip of audio from the microphone and transcribes it to
-text. This completes the conversational loop: you sign -> the LLM turns
-your gloss sequence into a sentence; the other person speaks a reply ->
-this transcribes it back to text on screen.
+text locally using faster-whisper. This completes the conversational
+loop: you sign -> the LLM turns your gloss sequence into a sentence;
+the other person speaks a reply -> this transcribes it back to text.
 
-Uses the SpeechRecognition library with Google's free Web Speech API for
-transcription (no API key needed, but does require an internet
-connection since the audio is sent to Google's servers for recognition).
+Uses `sounddevice` for recording (no PyAudio/PortAudio compilation
+headaches) and `faster-whisper` for transcription (runs fully offline
+on CPU after the model is downloaded once -- no API key, no internet
+needed at inference time, and no dependency on Google's web API).
 """
 
-import speech_recognition as sr
+import numpy as np
+import sounddevice as sd
+from faster_whisper import WhisperModel
 
-_recognizer = sr.Recognizer()
+SAMPLE_RATE = 16000  # whisper expects 16kHz mono audio
+
+# "base.en" is a good balance of speed/accuracy on CPU for English.
+# Swap to "small.en" for better accuracy (slower), or "tiny.en" for
+# faster/lower accuracy, via the WHISPER_MODEL env var if you want.
+import os
+MODEL_SIZE = os.environ.get("WHISPER_MODEL", "base.en")
+
+_model = None
 
 
-def listen_and_transcribe(timeout=5, phrase_time_limit=8):
+def _get_model():
+    """Lazily load the whisper model (downloads it once on first use,
+    caches it locally afterward)."""
+    global _model
+    if _model is None:
+        print(f"Loading whisper model '{MODEL_SIZE}' (first run downloads it)...")
+        _model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
+    return _model
+
+
+def listen_and_transcribe(duration=5):
     """
-    Listens on the default microphone for a single phrase and returns
-    the transcribed text.
-
-    timeout: seconds to wait for speech to start before giving up.
-    phrase_time_limit: max seconds of speech to capture once it starts.
-
-    Returns the transcribed string on success, or a short status message
-    (e.g. "(no speech detected)") if nothing usable was captured.
+    Records `duration` seconds of audio from the default microphone and
+    transcribes it. Returns the transcribed string, or a short status
+    message (e.g. "(no speech detected)") if nothing usable was heard.
     """
     try:
-        with sr.Microphone() as source:
-            _recognizer.adjust_for_ambient_noise(source, duration=0.5)
-            audio = _recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit)
-    except sr.WaitTimeoutError:
-        return "(no speech detected)"
-    except OSError as e:
+        recording = sd.rec(
+            int(duration * SAMPLE_RATE),
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype="float32",
+        )
+        sd.wait()
+    except Exception as e:
         return f"(microphone error: {e})"
 
+    audio = recording.flatten()
+
+    # Skip transcription entirely if the clip is near-silent -- saves
+    # time and avoids whisper hallucinating text from noise.
+    if np.abs(audio).mean() < 0.001:
+        return "(no speech detected)"
+
     try:
-        return _recognizer.recognize_google(audio)
-    except sr.UnknownValueError:
-        return "(could not understand audio)"
-    except sr.RequestError as e:
-        return f"(speech recognition service error: {e})"
+        model = _get_model()
+        segments, _info = model.transcribe(audio, language="en")
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+        return text if text else "(could not understand audio)"
+    except Exception as e:
+        return f"(transcription error: {e})"

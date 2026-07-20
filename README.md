@@ -6,11 +6,16 @@ detected sign sequence into a natural sentence.
 
 ## How it works
 
-1. **`embedding_utils.py`** — Uses MediaPipe Hands to extract 21 landmarks
+1. **`embedding_utils.py`** — Uses MediaPipe's **Tasks API** (`HandLandmarker`)
+   — the actively maintained hand-tracking API — to extract 21 landmarks
    per hand (x, y, z). Each hand's landmarks are normalized (centered on
    the wrist, scaled to unit size) so the embedding for a given sign looks
    similar no matter where your hand is in frame or how close to the
    camera. Two hands -> 126-number embedding.
+
+   Note: MediaPipe's older `mp.solutions.hands` API is deprecated and
+   broken on recent MediaPipe versions, so this project uses the newer
+   Tasks API instead, which requires a downloaded model file (next step).
 
 2. **`build_database.py`** — Lets you record short webcam clips for each
    sign you care about. Every frame's embedding is stored in a local
@@ -20,7 +25,12 @@ detected sign sequence into a natural sentence.
    Gemini or NVIDIA NIM at runtime via the `LLM_PROVIDER` environment
    variable — no code changes needed to switch.
 
-4. **`realtime_infer.py`** — Runs live:
+4. **`speech_utils.py`** — Captures a short clip from your microphone
+   using `sounddevice` and transcribes it locally using `faster-whisper`
+   (no API key, no internet needed after the model's first download).
+   This is the "hear the reply" half of the conversation loop.
+
+5. **`realtime_infer.py`** — Runs live:
    - Embeds each incoming webcam frame the same way.
    - Queries Chroma for the nearest stored embeddings (**retrieval**).
    - Uses a short rolling vote to avoid flicker/noise, and confirms a
@@ -30,6 +40,9 @@ detected sign sequence into a natural sentence.
      provider you've configured, which converts the raw signs into a
      grammatical sentence (**generation**, grounded only in what was
      actually retrieved).
+   - On demand (press `r`), listens on your microphone and transcribes
+     the other person's spoken reply, displaying it as text on screen —
+     completing the two-way conversation.
 
 This mirrors RAG's structure directly: retrieval narrows down *what was
 signed* from a knowledge base of examples, and the LLM handles turning
@@ -40,33 +53,44 @@ the signs itself, just the phrasing.
 
 ```bash
 pip install -r requirements.txt
+python download_model.py
 ```
+
+The second command downloads `hand_landmarker.task` (~a few MB) into the
+project folder — the Tasks API loads the hand-tracking model from this
+local file rather than bundling it in the pip package.
 
 Choose your LLM provider (only needed for the 'g' sentence-generation step
-— live recognition works without it):
+— live recognition works without it). API keys go in a `.env` file so you
+don't have to re-export them every terminal session:
 
-**Google Gemini:**
 ```bash
-export LLM_PROVIDER=gemini
-export GEMINI_API_KEY=your_key_here
-# optional, defaults to gemini-2.5-flash:
-export GEMINI_MODEL=gemini-2.5-flash
+cp .env.example .env
 ```
-Get a key at https://aistudio.google.com/apikey
 
-**NVIDIA NIM:**
-```bash
-export LLM_PROVIDER=nim
-export NVIDIA_API_KEY=your_key_here
-# optional, defaults to meta/llama-3.1-70b-instruct:
-export NIM_MODEL=meta/llama-3.1-70b-instruct
-# optional, only needed if self-hosting a NIM microservice instead of
-# using NVIDIA's hosted API:
-export NIM_BASE_URL=https://integrate.api.nvidia.com/v1
+Then open `.env` and fill in the section for whichever provider you're using:
+
+**Google Gemini** — get a key at https://aistudio.google.com/apikey:
 ```
-Get a key at https://build.nvidia.com
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=your_key_here
+```
+
+**NVIDIA NIM** — get a key at https://build.nvidia.com:
+```
+LLM_PROVIDER=nim
+NVIDIA_API_KEY=your_key_here
+```
+
+`llm_backends.py` loads `.env` automatically at startup. If you'd rather
+not use a file, plain `export LLM_PROVIDER=gemini` / `export
+GEMINI_API_KEY=...` in your shell works exactly the same way — `.env` is
+just a convenience so the values persist across sessions.
 
 If `LLM_PROVIDER` isn't set, it defaults to `gemini`.
+
+**Important:** don't commit `.env` to version control — it contains your
+API keys. Add it to `.gitignore` if you're using git.
 
 ## Usage
 
@@ -84,8 +108,24 @@ If `LLM_PROVIDER` isn't set, it defaults to `gemini`.
    python realtime_infer.py
    ```
    - `g` — generate a sentence from the signs detected so far
-   - `c` — clear the current sequence
+   - `r` — listen for a spoken reply and show it as text on screen
+   - `c` — clear the current sequence and reply
    - `q` — quit
+
+### Note on the reply / speech-to-text feature
+
+The `r` key uses `sounddevice` (mic recording) and `faster-whisper`
+(local transcription) — no API key needed, and it works offline after
+the first run. The first time you press `r`, it downloads the whisper
+model (~75MB for the default `base.en`) to a local cache, so that one
+run needs internet; every run after that is fully offline.
+
+If transcription is too slow or inaccurate on your machine, set the
+`WHISPER_MODEL` env var to change model size:
+```bash
+export WHISPER_MODEL=tiny.en   # faster, less accurate
+export WHISPER_MODEL=small.en  # slower, more accurate
+```
 
 ## Important limitation (and how to extend)
 

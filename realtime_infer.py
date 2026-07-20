@@ -1,26 +1,8 @@
 """
-realtime_infer.py
-
-Live webcam sign recognition using retrieval-augmented generation:
-
-  1. Extract a hand-landmark embedding from each webcam frame.
-  2. Query the Chroma vector DB (built with build_database.py) for the
-     nearest stored embeddings -> get candidate sign labels + distances.
-  3. Stabilize predictions with a short rolling buffer + majority vote,
-     so a single noisy frame doesn't flicker the output.
-  4. Every time a *new* stable sign is confirmed, append it to a running
-     "gloss sequence" (e.g. ["HELLO", "MY", "NAME", "ALEX"]).
-  5. Periodically (or on keypress), send that gloss sequence to Claude,
-     which turns the raw sign sequence into a natural sentence -- this
-     is the "generation" half of RAG.
-
-Usage:
-    export ANTHROPIC_API_KEY=your_key_here
-    python realtime_infer.py
-
 Controls:
     g  -> ask the LLM to turn the current gloss sequence into a sentence
-    c  -> clear the current gloss sequence
+    r  -> listen for a spoken reply and display it as text
+    c  -> clear the current sequence and reply
     q  -> quit
 """
 
@@ -33,6 +15,7 @@ import chromadb
 
 from embeding_utils import make_hands_detector, frame_to_embedding
 from llm_backends import glosses_to_sentence, get_provider_name, is_configured
+from speech_utils import listen_and_transcribe
 
 DB_PATH = "./chroma_db"
 COLLECTION_NAME = "sign_embeddings"
@@ -95,9 +78,11 @@ def main():
     last_confirmed_label = None
     last_confirmed_time = 0
     current_sentence = ""
+    reply_text = ""
 
     print("=== Live Sign Recognition ===")
-    print("Press 'g' to generate a sentence, 'c' to clear, 'q' to quit.\n")
+    print("Press 'g' to generate a sentence, 'r' to hear a reply, "
+          "'c' to clear, 'q' to quit.\n")
 
     while True:
         ok, frame = cap.read()
@@ -128,17 +113,29 @@ def main():
         cv2.putText(frame, f"Sequence: {' '.join(gloss_sequence[-8:])}", (10, 65),
                      cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         if current_sentence:
-            cv2.putText(frame, current_sentence, (10, 460),
+            cv2.putText(frame, current_sentence, (10, 430),
                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+        if reply_text:
+            cv2.putText(frame, f"Reply: {reply_text}", (10, 460),
+                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 200, 0), 2)
 
         cv2.imshow("Sign RAG - Live Inference", frame)
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             break
+        elif key == ord("r"):
+            print("Listening for reply...")
+            cv2.putText(frame, "Listening...", (10, 460),
+                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 200, 0), 2)
+            cv2.imshow("Sign RAG - Live Inference", frame)
+            cv2.waitKey(1)  # force the "Listening..." overlay to render before blocking
+            reply_text = listen_and_transcribe()
+            print(f"Reply: {reply_text}")
         elif key == ord("c"):
             gloss_sequence = []
             current_sentence = ""
+            reply_text = ""
             print("Cleared sequence.")
         elif key == ord("g"):
             if not llm_ready:

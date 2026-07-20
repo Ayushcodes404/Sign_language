@@ -1,7 +1,9 @@
-mediapipe>=0.10.9
+mediapipe>=0.10
 opencv-python>=4.9.0
 chromadb>=0.5.0
 google-genai>=0.3.0
 openai>=1.40.0
 numpy>=1.26.0
 python-dotenv>=1.0.0
+sounddevice>=0.4.6
+faster-whisper>=1.0.0
